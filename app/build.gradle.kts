@@ -54,6 +54,14 @@ android {
         }
     }
 }
+chaquopy{
+    defaultConfig{
+        pip{
+            install("Pillow")
+            install("matplotlib")
+        }
+    }
+}
 
 dependencies {
 
