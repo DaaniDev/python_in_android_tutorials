@@ -1,5 +1,6 @@
 package com.daanidev.pythontutorialandroid
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.res.AssetManager
 import android.graphics.Bitmap
@@ -41,10 +42,22 @@ import com.daanidev.pythontutorialandroid.ui.theme.PythonTutorialAndroidTheme
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import android.graphics.BitmapFactory
+import android.media.MediaScannerConnection
 import android.os.Build
+import android.os.Environment
+import android.util.Log
 import androidx.annotation.RequiresApi
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.TextField
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.text.font.Typeface
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
@@ -59,100 +72,200 @@ class MainActivity : ComponentActivity() {
         setContent {
             PythonTutorialAndroidTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    WaterMark(modifier = Modifier.padding(innerPadding))
+                    SelectImageScreen(modifier = Modifier.padding(innerPadding))
                 }
             }
         }
     }
 }
 
-@RequiresApi(Build.VERSION_CODES.O)
 @Composable
-fun WaterMark(modifier: Modifier) {
-    var selectedImageURI by remember { mutableStateOf<Uri?>(null) }
-    var selectedWaterMarkedBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    val mContext = LocalContext.current
+fun SelectImageScreen(modifier: Modifier) {
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var secretMessage by remember { mutableStateOf("") }
+    var secretKey by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var decryption by remember { mutableStateOf(false) }
+     val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = { uri -> selectedImageUri = uri }
+    )
 
-    val fontFile = getFontByteArray(mContext,R.font.play_fair_display_bold)
+    if(decryption.not()) {
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .wrapContentSize()
+            ) {
+                Button(modifier = Modifier.weight(1f), onClick = { launcher.launch("image/*") }) {
+                    Text("Encryption")
+                }
 
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        selectedImageURI = uri
-        uri?.let {
-            val inputStream: InputStream? = mContext.contentResolver.openInputStream(it)
-            val byteArrayOutputStream = ByteArrayOutputStream()
-            inputStream?.copyTo(byteArrayOutputStream)
-            inputStream?.close()
+                Button(modifier = Modifier.weight(1f), onClick = {
+                    decryption = !decryption
+                }) {
+                    Text("Decryption")
+                }
 
-            val imageBytes = byteArrayOutputStream.toByteArray()
-
-            // Call Python code with the byte array
-            val py = Python.getInstance()
-            val pyFile = py.getModule("water_mark")
-            val resultPath = mContext.filesDir.path + "/watermarked_image.jpg"
-
-            // For Opacity value will be in range 0 - 255
-            pyFile.callAttr("add_text_watermark_from_bytes", imageBytes, resultPath, "Watermark Text",fontFile,"maroon",40,WaterMarkPosition.BOTTOM_CENTER.name,200)
-
-            // Load the result image
-            val resultBitmap = BitmapFactory.decodeFile(resultPath)
-            selectedWaterMarkedBitmap = resultBitmap
-        }
-    }
-
-    Column(
-        modifier = modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Button(onClick = { launcher.launch("image/*") }) {
-            Text(text = "Select Image")
-        }
-        Spacer(modifier = Modifier.padding(10.dp))
-
-        selectedImageURI?.let {
-            val inputStream = mContext.contentResolver.openInputStream(it)
-            val bitmap = BitmapFactory.decodeStream(inputStream)
-            inputStream?.close()
-            bitmap?.let {
-                Image(
-                    bitmap = it.asImageBitmap(),
-                    contentDescription = null,
-                    modifier = Modifier.size(200.dp)
-                )
             }
 
+            selectedImageUri?.let { uri ->
+                Text("Selected Image: $uri")
+
+                TextField(
+                    value = secretMessage,
+                    onValueChange = { secretMessage = it },
+                    label = { Text("Enter Secret Message") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                TextField(
+                    value = secretKey,
+                    onValueChange = { secretKey = it },
+                    label = { Text("Enter Secret Key") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Button(onClick = {
+                    scope.launch {
+                        val imageBytes = getBytesFromUri(context, uri)
+                        if (imageBytes != null) {
+                            val python = Python.getInstance()
+                            val steganography = python.getModule("steganography")
+
+                            val result = steganography.callAttr(
+                                "hide_text_with_key_bytearray",
+                                imageBytes,
+                                secretMessage,
+                                secretKey
+                            ).toJava(ByteArray::class.java)
+                             saveImageToMediaStore(context, "encrypted_image.png", result)
+                        } else {
+                            Toast.makeText(context, "Failed to read image", Toast.LENGTH_SHORT)
+                                .show()
+                        }
+                    }
+                }) {
+                    Text("Hide Message")
+                }
+            }
+        }
+    }
+
+    if (decryption) {
+        DecryptImageScreen()
+    }
+}
+
+@Composable
+fun DecryptImageScreen() {
+    var selectedImageUri by remember { mutableStateOf<Uri?>(null) }
+    var enteredKey by remember { mutableStateOf("") }
+    var extractedMessage by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent(),
+        onResult = { uri -> selectedImageUri = uri }
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Button(onClick = { launcher.launch("image/*") }) {
+            Text("Select Image from Gallery")
         }
 
-        selectedWaterMarkedBitmap?.let {
-            Image(
-                bitmap = it.asImageBitmap(),
-                contentDescription = null,
-                modifier = Modifier.size(300.dp)
+        selectedImageUri?.let { uri ->
+            Text("Selected Image: $uri")
+
+            TextField(
+                value = enteredKey,
+                onValueChange = { enteredKey = it },
+                label = { Text("Enter Secret Key") },
+                modifier = Modifier.fillMaxWidth()
             )
 
+            Button(onClick = {
+                scope.launch {
+                    val imageBytes = getBytesFromUri(context, uri)
+                    if (imageBytes != null) {
+                        val python = Python.getInstance()
+                        val stego = python.getModule("steganography")
+
+                        val result = stego.callAttr(
+                            "extract_text_with_key_bytearray",
+                            imageBytes
+                        ).asList()
+
+                        Log.i("result_image","$result")
+
+                        extractedMessage = if (result.size == 2) {
+                            val extractedKey = result[0].toString()
+                            val message = result[1].toString()
+                            Log.i("result_image", "$extractedKey / $message")
+                            if (extractedKey == enteredKey) {
+                                message
+                            } else {
+                                "Incorrect key!"
+                            }
+                        } else {
+                            "No hidden message found!"
+                        }
+                    } else {
+                        Toast.makeText(context, "Failed to read image", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }) {
+                Text("Decrypt Message")
+            }
+
+            extractedMessage?.let {
+                Text(
+                    text = it,
+                    modifier = Modifier.padding(top = 16.dp),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
         }
     }
 }
 
-fun getFontByteArray(mContext: Context,fontId: Int): ByteArray {
-    val inputStream = mContext.resources.openRawResource(fontId)
-    val byteArrayOutputStream = ByteArrayOutputStream()
 
-    var byte: Int
-    while (inputStream.read().also { byte = it } != -1) {
-        byteArrayOutputStream.write(byte)
+suspend fun getBytesFromUri(context: Context, uri: Uri): ByteArray? {
+    return withContext(Dispatchers.IO) {
+        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
     }
-
-    inputStream.close()
-    return byteArrayOutputStream.toByteArray()
 }
 
-enum class WaterMarkPosition{
-    TOP_RIGHT,
-    TOP_LEFT,
-    BOTTOM_RIGHT,
-    BOTTOM_LEFT,
-    TOP_CENTER,
-    BOTTOM_CENTER,
-    CENTER
+fun saveImageToMediaStore(context: Context, fileName: String, imageBytes: ByteArray) {
+    val resolver = context.contentResolver
+    val contentValues = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES) // Save in Pictures folder
+    }
+
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+
+    uri?.let {
+        resolver.openOutputStream(it).use { outputStream ->
+            outputStream?.write(imageBytes)
+        }
+        Log.d("Gallery", "Image saved to MediaStore: $uri")
+        Toast.makeText(context, "Image saved to gallery", Toast.LENGTH_SHORT).show()
+    } ?: run {
+        Toast.makeText(context, "Failed to save image", Toast.LENGTH_SHORT).show()
+    }
 }
